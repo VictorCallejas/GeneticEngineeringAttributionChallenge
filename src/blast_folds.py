@@ -1,8 +1,6 @@
 import numpy as np
 import pandas as pd
 
-import sys
-import random
 import os
 
 import argparse
@@ -15,40 +13,11 @@ import itertools
 
 from tqdm import tqdm
 
-random.seed(420)
-np.random.seed(420)
-
 from pandarallel import pandarallel
-pandarallel.initialize(progress_bar=True)
-
-from multiprocessing.reduction import ForkingPickler, AbstractReducer
-
-class ForkingPickler4(ForkingPickler):
-    def __init__(self, *args):
-        if len(args) > 1:
-            args[1] = 2
-        else:
-            args.append(2)
-        super().__init__(*args)
-
-    @classmethod
-    def dumps(cls, obj, protocol=4):
-        return ForkingPickler.dumps(obj, protocol)
+pandarallel.initialize(progress_bar=False)
 
 
-def dump(obj, file, protocol=4):
-    ForkingPickler4(file, protocol).dump(obj)
-
-
-class Pickle4Reducer(AbstractReducer):
-    ForkingPickler = ForkingPickler4
-    register = ForkingPickler4.register
-    dump = dump
-
-ctx = mp.get_context()
-ctx.reducer = Pickle4Reducer()
-
-def Worker(f_idx,args):
+def Blast_worker(f_idx,args):
 
     print('-------FOLD ',f_idx)
     X_train = pd.read_csv('../data/folds/'+str(args.folds)+'/X_train_split_'+str(f_idx)+'.csv')
@@ -66,7 +35,7 @@ def Worker(f_idx,args):
     print('-------FOLD ',f_idx,'train fasta db created')
 
     with open('../data/features/blast/'+str(f_idx)+'_query.fasta','w+') as f:
-        for i in range(2):
+        for i in range(len(test)):
             f.write(f'>{i}\n')
             f.write(f'{test["sequence"].values[i]}\n')
     print('-------FOLD ',f_idx,'test fasta file created')
@@ -78,23 +47,26 @@ def Worker(f_idx,args):
     os.system('blastn -db ../data/features/blast/'+str(f_idx)+'_train.fasta -query ../data/features/blast/'+str(f_idx)+'_query.fasta -out '+result_name+' -outfmt 10 -max_target_seqs 9999999 -evalue '+str(cutoff)+' -max_hsps=1 -num_threads '+str(args.num_threads))
     print('-------FOLD ',f_idx,'query result created')
 
-ns = None
-def query_worker(seq_id):
 
-    tmp = np.zeros(shape=len(ns.cols)).tolist()
-    hits = ns.blast[ns.blast['query_id']==seq_id]
+def Query_worker(args):
+
+    hits = args[0][1]
+    cols = args[1]
+    lab_pos = args[2]
+
+    tmp = np.zeros(shape=len(cols)).tolist()
+    seq_id = args[0][0]
+
     for i,hit in hits.iterrows():
-        idx = ns.lab_pos[hit[1]]*11
+        idx = lab_pos[hit[1]]*11
         tmp[idx]+=1
         if tmp[idx+10]<hit[11]:
             tmp[idx+1:idx+10]=hit[2:11]
     tmp[-1]=seq_id
     return tmp
 
-# pip install tqdm pandarallel && cd gen/src && python blast_folds.py --folds 10 --num_threads 94
+# cd gen/src && python blast_folds.py --folds 10 --num_threads 95 --mode query
 def main(args):
-
-    global ns
 
     os.environ['OMP_NUM_THREADS'] = str(args.num_threads)
 
@@ -109,63 +81,61 @@ def main(args):
         cols.extend([lab+'hits',lab+'identity', lab+'alignment length', lab+'mismatches', lab+'gap opens', lab+'q. start', lab+'q. end', lab+'s. start', lab+'s. end', lab+'evalue', lab+'bit score'])
     cols.extend(['sequence_id'])
 
-    jobs = []
-    for f_idx in range(1,args.folds+1):
-        w = mp.Process(target=Worker, args=(f_idx,args))
-        jobs.append(w)
-        w.start()
+    if ((args.mode == 'full') | (args.mode == 'blast')):
 
-    print('Todos los procesos lanzados')
+        jobs = []
+        for f_idx in range(1,args.folds+1):
+            w = mp.Process(target=Blast_worker, args=(f_idx,args))
+            jobs.append(w)
+            w.start()
 
-    for p, job in enumerate(jobs):
-        print('esperando proceso ',p+1)
-        job.join()
-        print('proceso ',p+1,' finalizado')
+        print('Todos los procesos lanzados')
 
-    os.system('rm ../data/features/blast/*.*')
+        for p, job in enumerate(jobs):
+            print('esperando proceso ',p+1)
+            job.join()
+            print('proceso ',p+1,' finalizado')
 
-    mrg = mp.Manager()
-    ns = mrg.Namespace()
-    ns.cols = cols
-    ns.lab_pos = lab_pos
+        os.system('rm ../data/features/blast/*.*')
+    if((args.mode == 'full') | (args.mode == 'query')):
+        print('Creating Result DFs...')
+        
+        for f_idx in range(1,args.folds+1):
+
+            result_name = '../data/features/blast/'+str(args.folds)+"/dev_blast_"+str(f_idx)+".csv"
+            test = pd.read_csv('../data/folds/'+str(args.folds)+'/X_dev_split_'+str(f_idx)+'.csv')
+            y_train = pd.read_csv('../data/folds/'+str(args.folds)+'/y_train_split_'+str(f_idx)+'.csv')
+
+            headers = ['query_id', 'subject_id', 'identity', 'alignment length', 'mismatches', 'gap opens', 'q. start', 'q. end', 's. start', 's. end', 'evalue', 'bit score']
+            blast = pd.read_csv(result_name, names=headers)
+            print('-------FOLD ',f_idx,'blast df created')
+
+            ids = test.sequence_id.values
+            blast.query_id = blast.query_id.parallel_apply(lambda x : ids[x])
+            blast.subject_id = blast.subject_id.parallel_apply(lambda x: y_train.target[x])
+            print('-------FOLD ',f_idx,'Ids and target translated')
+
+            blast = blast.groupby('query_id')
+
+            pool = mp.Pool(args.num_threads)
+
+            rows = []
+            with tqdm(total=len(blast)) as pbar:
+                for i, row in enumerate(pool.imap_unordered(Query_worker, zip(blast,itertools.repeat(cols),itertools.repeat(lab_pos)))):
+                    rows.append(row)
+                    pbar.update()
+
+            pool.close()
+            pool.join()
+
+            result = pd.DataFrame(rows,columns=cols)
+            print('dataset created')
+            result_name = '../data/features/blast/'+str(args.folds)+"/dev_result_"+str(f_idx)+".csv"
+            print('saving csv')
+            result.to_csv(result_name,index=False)
+
+            print('-------FOLD ',f_idx,'______END')
     
-    for f_idx in range(1,args.folds+1):
-
-        result_name = '../data/features/blast/'+str(args.folds)+"/dev_blast_"+str(f_idx)+".csv"
-        test = pd.read_csv('../data/folds/'+str(args.folds)+'/X_dev_split_'+str(f_idx)+'.csv')
-        y_train = pd.read_csv('../data/folds/'+str(args.folds)+'/y_train_split_'+str(f_idx)+'.csv')
-
-        headers = ['query_id', 'subject_id', 'identity', 'alignment length', 'mismatches', 'gap opens', 'q. start', 'q. end', 's. start', 's. end', 'evalue', 'bit score']
-        blast = pd.read_csv(result_name, names=headers)
-        print('-------FOLD ',f_idx,'blast df created')
-
-        ids = test.sequence_id.values
-        blast.query_id = blast.query_id.parallel_apply(lambda x : ids[x])
-        blast.subject_id = blast.subject_id.parallel_apply(lambda x: y_train.target[x])
-        print('-------FOLD ',f_idx,'Ids and target translated')
-
-        ns.blast = blast
-        del blast
-
-        pool = mp.Pool(args.num_threads)
-
-        rows = []
-        with tqdm(total=len(ids)) as pbar:
-            for i, row in enumerate(pool.imap_unordered(query_worker, ids)):
-                rows.append(row)
-                pbar.update()
-
-        pool.close()
-        pool.join()
-
-        result = pd.DataFrame(rows,columns=cols)
-        print('dataset created')
-        result_name = '../data/features/blast/'+str(args.folds)+"/dev_result_"+str(f_idx)+".csv"
-        print('saving csv')
-        result.to_csv(result_name,index=False)
-
-        print('-------FOLD ',f_idx,'______END')
- 
     print('PROGRAM END_____')
 
 
@@ -175,7 +145,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--folds", default=5,type=int)
     parser.add_argument("--num_threads", default=8,type=int)
-
+    parser.add_argument("--mode", default='full',type=str,choices=['full','blast','query'])
     args = parser.parse_args()
 
     main(args)
