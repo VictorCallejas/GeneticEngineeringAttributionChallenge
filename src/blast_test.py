@@ -34,7 +34,7 @@ def Query_worker(args):
     tmp[-1]=seq_id
     return tmp
 
-# cd gen/src && python blast_test.py --num_threads 95 --mode full
+# cd gen/src && python blast_test.py --num_threads 95 --mode query
 def main(args):
 
     os.environ['OMP_NUM_THREADS'] = str(args.num_threads)
