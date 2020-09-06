@@ -27,10 +27,10 @@ def Query_worker(args):
     seq_id = args[0][0]
 
     for i,hit in hits.iterrows():
-        idx = lab_pos[hit[1]]*11
+        idx = lab_pos[hit[1]]*6
         tmp[idx]+=1
-        if tmp[idx+10]<hit[11]:
-            tmp[idx+1:idx+10]=hit[2:11]
+        if tmp[idx+5]<hit[6]:
+            tmp[idx+1:idx+5]=hit[2:6]
     tmp[-1]=seq_id
     return tmp
 
@@ -47,7 +47,7 @@ def main(args):
     for lab in labs:
         lab_pos[lab]=i
         i=i+1
-        cols.extend([lab+'hits',lab+'identity', lab+'alignment length', lab+'mismatches', lab+'gap opens', lab+'q. start', lab+'q. end', lab+'s. start', lab+'s. end', lab+'evalue', lab+'bit score'])
+        cols.extend([lab+'hits',lab+'identity', lab+'alignment length', lab+'mismatches', lab+'gap opens', lab+'bit score'])
     cols.extend(['sequence_id'])
 
     print('-------TEST')
@@ -88,7 +88,7 @@ def main(args):
         print('Creating Result DFs...')
         
         headers = ['query_id', 'subject_id', 'identity', 'alignment length', 'mismatches', 'gap opens', 'q. start', 'q. end', 's. start', 's. end', 'evalue', 'bit score']
-        blast = pd.read_csv(result_name, names=headers)
+        blast = pd.read_csv(result_name, names=headers)[['query_id', 'subject_id', 'identity', 'alignment length', 'mismatches', 'gap opens', 'bit score']]
         print('-------TEST blast df created')
 
         ids = test.sequence_id.values
